@@ -62,6 +62,20 @@ We therefore urge users to carefully choose upfront the consistency level that w
 use cases. If there is a legitimate reason to downgrade and retry, that should be handled by the
 application code.
 
+### Where is the cross-datacenter failover feature that existed in driver 3?
+
+In driver 3, it was possible to configure the load balancing policy to automatically failover to
+a remote datacenter, when the local datacenter is down.
+
+This ability is considered a misfeature and has been removed from driver 4.0 onwards.
+
+However, due to popular demand, cross-datacenter failover has been brought back to driver 4 in
+version 4.10.0.
+
+If you are using a driver version >= 4.10.0, read the [manual](../manual/core/loadbalancing/) to
+understand how to enable this feature; for driver versions < 4.10.0, this feature is simply not
+available.
+
 ### I want to set a date on a bound statement, where did `setTimestamp()` go?
 
 The driver now uses Java 8's improved date and time API. CQL type `timestamp` is mapped to

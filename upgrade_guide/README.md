@@ -2,6 +2,17 @@
 
 ### 4.10.0
 
+#### Cross-datacenter failover
+
+[JAVA-2899](https://datastax-oss.atlassian.net/browse/JAVA-2676) re-introduced the ability to
+perform cross-datacenter failover using the driver's built-in load balancing policies. See [Load
+balancing](../manual/core/loadbalancing/) in the manual for details.
+
+Cross-datacenter failover is disabled by default, therefore existing applications should not
+experience any disruption.
+
+#### Enhancements to the `Uuids` utility class
+
 [JAVA-2449](https://datastax-oss.atlassian.net/browse/JAVA-2449) modified the implementation of
 [Uuids.random()]: this method does not delegate anymore to the JDK's `java.util.UUID.randomUUID()`
 implementation, but instead re-implements random UUID generation using the non-cryptographic

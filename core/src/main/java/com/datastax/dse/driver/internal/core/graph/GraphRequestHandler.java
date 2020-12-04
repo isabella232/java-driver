@@ -59,7 +59,7 @@ import com.datastax.oss.driver.internal.core.session.DefaultSession;
 import com.datastax.oss.driver.internal.core.tracker.NoopRequestTracker;
 import com.datastax.oss.driver.internal.core.tracker.RequestLogger;
 import com.datastax.oss.driver.internal.core.util.Loggers;
-import com.datastax.oss.driver.internal.core.util.collection.QueryPlan;
+import com.datastax.oss.driver.internal.core.util.collection.SimpleQueryPlan;
 import com.datastax.oss.protocol.internal.Frame;
 import com.datastax.oss.protocol.internal.Message;
 import com.datastax.oss.protocol.internal.response.Error;
@@ -216,7 +216,7 @@ public class GraphRequestHandler implements Throttled {
     }
     Queue<Node> queryPlan =
         statement.getNode() != null
-            ? new QueryPlan(statement.getNode())
+            ? new SimpleQueryPlan(statement.getNode())
             : context
                 .getLoadBalancingPolicyWrapper()
                 .newQueryPlan(statement, executionProfile.getName(), session);
