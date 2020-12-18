@@ -2,6 +2,8 @@
 
 ### 4.10.0
 
+#### New `RetryVerdict` API
+
 [JAVA-2900](https://datastax-oss.atlassian.net/browse/JAVA-2900) introduced [`RetryVerdict`], a new 
 interface that allows custom retry policies to customize the request before it is retried.
 
@@ -28,6 +30,30 @@ Driver 4.10.0 also re-introduced a retry policy whose behavior is equivalent to 
 for more information.
 
 [`RetryVerdict`]: https://docs.datastax.com/en/drivers/java/latest/com/datastax/oss/driver/api/core/retry/RetryVerdict.html
+
+#### Enhancements to the `Uuids` utility class
+
+[JAVA-2449](https://datastax-oss.atlassian.net/browse/JAVA-2449) modified the implementation of
+[Uuids.random()]: this method does not delegate anymore to the JDK's `java.util.UUID.randomUUID()`
+implementation, but instead re-implements random UUID generation using the non-cryptographic
+random number generator `java.util.Random`.
+
+For most users, non cryptographic strength is enough and this change should translate into better 
+performance when generating UUIDs for database insertion. However, in the unlikely case where your
+application requires cryptographic strength for UUID generation, you should update your code to
+use `java.util.UUID.randomUUID()` instead of `com.datastax.oss.driver.api.core.uuid.Uuids.random()` 
+from now on.
+
+This release also introduces two new methods for random UUID generation:
+
+1. [Uuids.random(Random)]: similar to `Uuids.random()` but allows to pass a custom instance of 
+   `java.util.Random` and/or re-use the same instance across calls.
+2. [Uuids.random(SplittableRandom)]: similar to `Uuids.random()` but uses a 
+   `java.util.SplittableRandom` instead.
+
+[Uuids.random()]: https://docs.datastax.com/en/drivers/java/latest/com/datastax/oss/driver/api/core/uuid/Uuids.html#random--
+[Uuids.random(Random)]: https://docs.datastax.com/en/drivers/java/latest/com/datastax/oss/driver/api/core/uuid/Uuids.html#random-java.util.Random-
+[Uuids.random(SplittableRandom)]: https://docs.datastax.com/en/drivers/java/latest/com/datastax/oss/driver/api/core/uuid/Uuids.html#random-java.util.SplittableRandom-
 
 ### 4.5.x - 4.6.0
 
