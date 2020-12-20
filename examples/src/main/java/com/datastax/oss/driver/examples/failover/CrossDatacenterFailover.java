@@ -19,6 +19,7 @@ import com.datastax.dse.driver.api.core.cql.reactive.ReactiveRow;
 import com.datastax.oss.driver.api.core.AllNodesFailedException;
 import com.datastax.oss.driver.api.core.CqlSession;
 import com.datastax.oss.driver.api.core.DriverException;
+import com.datastax.oss.driver.api.core.DriverTimeoutException;
 import com.datastax.oss.driver.api.core.NoNodeAvailableException;
 import com.datastax.oss.driver.api.core.config.DriverConfigLoader;
 import com.datastax.oss.driver.api.core.config.OptionsMap;
@@ -27,10 +28,13 @@ import com.datastax.oss.driver.api.core.cql.AsyncResultSet;
 import com.datastax.oss.driver.api.core.cql.SimpleStatement;
 import com.datastax.oss.driver.api.core.cql.Statement;
 import com.datastax.oss.driver.api.core.metadata.Node;
-import com.datastax.oss.driver.api.core.servererrors.QueryExecutionException;
+import com.datastax.oss.driver.api.core.servererrors.CoordinatorException;
+import com.datastax.oss.driver.api.core.servererrors.QueryConsistencyException;
+import com.datastax.oss.driver.api.core.servererrors.UnavailableException;
 import com.datastax.oss.driver.internal.core.util.concurrent.CompletableFutures;
 import java.util.Collections;
-import java.util.Objects;
+import java.util.List;
+import java.util.Map.Entry;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutionException;
@@ -41,16 +45,28 @@ import reactor.core.publisher.Flux;
  * code.
  *
  * <p>Starting with driver 4.10, cross-datacenter failover is also provided as a configuration
- * option for built-in load balancing policies. See the <a
- * href="https://docs.datastax.com/en/developer/java-driver/latest/manual/core/load_balancing/">manual</a>.
+ * option for built-in load balancing policies. See <a
+ * href="https://docs.datastax.com/en/developer/java-driver/latest/manual/core/load_balancing/">Load
+ * balancing</a> in the manual.
  *
  * <p>This example demonstrates how to achieve the same effect in application code, which confers
  * more fained-grained control over which statements should be retried and where.
  *
- * <p>This examples showcases cross-datacenter failover with 3 different programming styles:
- * synchronous, asynchronous and reactive (using the Reactor library). The 3 styles are identical in
- * terms of failover effect; they are all included merely to help programmers pick the variant that
- * is closest to the style they use.
+ * <p>The logic that decides whether or not a cross-DC failover should be attempted is presented in
+ * the {@link #shouldFailover(DriverException)} method below; study it carefully and adapt it to
+ * your needs if necessary.
+ *
+ * <p>The actual request execution and failover code is presented in 3 different programming styles:
+ *
+ * <ol>
+ *   <li>Synchronous: see the {@link #writeSync()} method below;
+ *   <li>Asynchronous: see the {@link #writeAsync()} method below;
+ *   <li>Reactive (using <a href="https://projectreactor.io/">Reactor</a>): see the {@link
+ *       #writeReactive()} method below.
+ * </ol>
+ *
+ * The 3 styles are identical in terms of failover effect; they are all included merely to help
+ * programmers pick the variant that is closest to the style they use.
  *
  * <p>Preconditions:
  *
@@ -116,11 +132,11 @@ public class CrossDatacenterFailover {
     datastax-java-driver {
       basic.contact-points = [ "127.0.0.1:9042" ]
       basic.load-balancing-policy.local-datacenter = "dc1"
-      basic.request.consistency = QUORUM
+      basic.request.consistency = LOCAL_QUORUM
       profiles {
         remote {
           basic.load-balancing-policy.local-datacenter = "dc2"
-          basic.request.consistency = ONE
+          basic.request.consistency = LOCAL_ONE
         }
       }
     }
@@ -133,10 +149,10 @@ public class CrossDatacenterFailover {
     options.put("remote", TypedDriverOption.LOAD_BALANCING_LOCAL_DATACENTER, "dc2");
     // make sure to provide a contact point belonging to dc1, not dc2!
     options.put(TypedDriverOption.CONTACT_POINTS, Collections.singletonList("127.0.0.1:9042"));
-    // in this example, the default consistency level is QUORUM
-    options.put(TypedDriverOption.REQUEST_CONSISTENCY, "QUORUM");
-    // but when failing over, the consistency level will be automatically downgraded to ONE
-    options.put("remote", TypedDriverOption.REQUEST_CONSISTENCY, "ONE");
+    // in this example, the default consistency level is LOCAL_QUORUM
+    options.put(TypedDriverOption.REQUEST_CONSISTENCY, "LOCAL_QUORUM");
+    // but when failing over, the consistency level will be automatically downgraded to LOCAL_ONE
+    options.put("remote", TypedDriverOption.REQUEST_CONSISTENCY, "LOCAL_ONE");
 
     session = CqlSession.builder().withConfigLoader(DriverConfigLoader.fromMap(options)).build();
 
@@ -295,64 +311,136 @@ public class CrossDatacenterFailover {
   }
 
   /**
-   * Analyzes the error and decides whether to failover to a remote DC. Adjust this logic to your
-   * needs.
+   * Analyzes the error and decides whether to failover to a remote DC.
    *
-   * <p>In a typical whole datacenter outage scenario, the error you get is {@link
-   * NoNodeAvailableException}.
-   *
-   * <p>In case of a partial datacenter outage (that is, some nodes were up in the datacenter, but
-   * none could handle the request):
+   * <p>The logic below categorizes driver exceptions in four main groups:
    *
    * <ol>
-   *   <li>If only one coordinator was tried: you usually get back a {@link
-   *       QueryExecutionException}. Is is generally not worth failing over since it means the
-   *       driver itself thinks that the failure is permanent.
-   *   <li>If more than one coordinator was tried: the error you get is {@link
-   *       AllNodesFailedException}, and you can inspect {@link
-   *       AllNodesFailedException#getAllErrors()} to understand what happened with each
-   *       coordinator.
+   *   <li>Total DC outage: all nodes in DC were known to be down when the request was executed;
+   *   <li>Partial DC outage: one or many nodes responded, but reported a replica availability
+   *       problem;
+   *   <li>DC unreachable: one or many nodes were queried, but none responded (timeout);
+   *   <li>Other errors.
    * </ol>
+   *
+   * A DC failover is authorized for the first three groups above: total DC outage, partial DC
+   * outage, and DC unreachable.
+   *
+   * <p>This logic is provided as a good starting point for users to create their own DC failover
+   * strategy; please adjust it to your exact needs.
    */
-  private boolean shouldFailover(DriverException e) {
-    if (e instanceof QueryExecutionException) {
-      // This includes: UnavailableException, WriteTimeoutException, ReadTimeoutException, etc.
-      // It is usually not worth failing over to a remote DC here, as the request is likely
-      // to fail again, *unless* the consistency level is DC-local, or if you plan to downgrade the
-      // consistency level when retrying.
-      Node coordinator = Objects.requireNonNull(e.getExecutionInfo().getCoordinator());
-      System.out.printf(
-          "Node %s in DC %s failed: %s%n",
-          coordinator.getEndPoint(), coordinator.getDatacenter(), e);
-      return false;
-    } else if (e instanceof AllNodesFailedException) {
-      if (e instanceof NoNodeAvailableException) {
-        // This could be a total DC outage.
-        System.out.println("All nodes were down in this datacenter");
-      } else {
-        // This could be a partial DC outage.
-        // In a real application, here you would inspect how many coordinators were tried,
-        // and which errors they returned.
-        ((AllNodesFailedException) e)
-            .getAllErrors()
-            .forEach(
-                (coordinator, errors) -> {
-                  System.out.printf(
-                      "Node %s in DC %s was tried %d times but failed with:%n",
-                      coordinator.getEndPoint(), coordinator.getDatacenter(), errors.size());
-                  for (Throwable error : errors) {
-                    System.out.printf("\t- %s%n", error);
-                  }
-                });
-      }
-      // If no nodes in the local DC could handle the request, assume this was a complete or partial
-      // DC outage and fail over to a remote DC.
+  private boolean shouldFailover(DriverException mainException) {
+
+    if (mainException instanceof NoNodeAvailableException) {
+
+      // No node could be tried, because all nodes in the query plan were down. This could be a
+      // total DC outage, so trying another DC makes sense.
+      System.out.println("All nodes were down in this datacenter, failing over");
       return true;
+
+    } else if (mainException instanceof AllNodesFailedException) {
+
+      // Many nodes were tried (as decided by the retry policy), but all failed. This could be a
+      // partial DC outage. We need to inspect the error to find out how many coordinators were
+      // tried, and which errors they returned.
+
+      boolean failover = false;
+
+      for (Entry<Node, List<Throwable>> entry :
+          ((AllNodesFailedException) mainException).getAllErrors().entrySet()) {
+
+        Node coordinator = entry.getKey();
+        List<Throwable> errors = entry.getValue();
+
+        System.out.printf(
+            "Node %s in DC %s was tried %d times but failed with:%n",
+            coordinator.getEndPoint(), coordinator.getDatacenter(), errors.size());
+
+        for (Throwable nodeException : errors) {
+
+          System.out.printf("\t- %s%n", nodeException);
+
+          // If the error was a replica availability error, then we know that some replicas were
+          // down in this DC. Retrying in another DC could solve the problem. Other errors don't
+          // necessarily mean that the DC is unavailable, so we ignore them.
+          if (isReplicaAvailabilityError(nodeException)) {
+            failover = true;
+          }
+        }
+      }
+
+      // Authorize the failover if at least one of the coordinators reported a replica availability
+      // error that could be solved by trying another DC.
+      if (failover) {
+        System.out.println(
+            "Some nodes tried in this DC reported a replica availability problem, failing over");
+      } else {
+        System.out.println("All nodes tried in this DC failed unexpectedly, not failing over");
+      }
+      return failover;
+
+    } else if (mainException instanceof DriverTimeoutException) {
+
+      // One or many nodes were tried, but none replied in a timely manner, and a timeout
+      // was triggered. This could be a DC outage as well, or a network partition issue, so trying
+      // another DC may make sense.
+
+      System.out.println(
+          "No node in this DC replied before the timeout was triggered, failing over");
+      return true;
+
+    } else if (mainException instanceof CoordinatorException) {
+
+      // Only one node was tried, and it failed (and the retry policy did not tell the driver to
+      // retry this request, but rather to surface the error immediately). This is rather unusual
+      // as the driver's default retry policy retries most of these errors, but some custom retry
+      // policies could decide otherwise. So we apply the same logic as above: if the error is a
+      // replica availability error, we authorize the failover.
+
+      Node coordinator = ((CoordinatorException) mainException).getCoordinator();
+      System.out.printf(
+          "Node %s in DC %s was tried once but failed with: %s%n",
+          coordinator.getEndPoint(), coordinator.getDatacenter(), mainException);
+
+      boolean failover = isReplicaAvailabilityError(mainException);
+      if (failover) {
+        System.out.println(
+            "The only node tried in this DC reported a replica availability problem, failing over");
+      } else {
+        System.out.println("The only node tried in this DC failed unexpectedly, not failing over");
+      }
+      return failover;
+
     } else {
-      // Other errors: don't failover.
-      System.out.println("Unexpected error: " + e);
+
+      // The request failed with a rather unusual error. This generally indicates a more serious
+      // issue, since the retry policy decided to surface the error immediately. Trying another DC
+      // is not a good idea.
+      System.out.println("The request failed unexpectedly, not failing over: " + mainException);
       return false;
     }
+  }
+
+  /**
+   * Whether the given error is a replica availability error.
+   *
+   * <p>A replica availability error means that the initial consistency level could not be met
+   * because not enough replicas were alive in the DC.
+   *
+   * <p>When this error happens, it can be worth failing over to a remote DC, <em>as long as at
+   * least one of the following conditions apply</em>:
+   *
+   * <ol>
+   *   <li>if the initial consistency level was DC-local, trying another DC may succeed;
+   *   <li>if the initial consistency level can be downgraded, then retrying again may succeed (in
+   *       the same DC, or in another one).
+   * </ol>
+   *
+   * In this example both conditions above apply, so we authorize the failover whenever we detect a
+   * replica availability error.
+   */
+  private boolean isReplicaAvailabilityError(Throwable t) {
+    return t instanceof UnavailableException || t instanceof QueryConsistencyException;
   }
 
   private void close() {
