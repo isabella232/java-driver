@@ -341,11 +341,12 @@ public class CrossDatacenterFailover {
     } else if (mainException instanceof AllNodesFailedException) {
 
       // Many nodes were tried (as decided by the retry policy), but all failed. This could be a
-      // partial DC outage. We need to inspect the error to find out how many coordinators were
-      // tried, and which errors they returned.
+      // partial DC outage: some nodes were up, but the replicas were down.
 
       boolean failover = false;
 
+      // Inspect the error to find out how many coordinators were tried, and which errors they
+      // returned.
       for (Entry<Node, List<Throwable>> entry :
           ((AllNodesFailedException) mainException).getAllErrors().entrySet()) {
 
@@ -373,7 +374,7 @@ public class CrossDatacenterFailover {
       // error that could be solved by trying another DC.
       if (failover) {
         System.out.println(
-            "Some nodes tried in this DC reported a replica availability problem, failing over");
+            "Some nodes tried in this DC reported a replica availability error, failing over");
       } else {
         System.out.println("All nodes tried in this DC failed unexpectedly, not failing over");
       }
@@ -405,7 +406,7 @@ public class CrossDatacenterFailover {
       boolean failover = isReplicaAvailabilityError(mainException);
       if (failover) {
         System.out.println(
-            "The only node tried in this DC reported a replica availability problem, failing over");
+            "The only node tried in this DC reported a replica availability error, failing over");
       } else {
         System.out.println("The only node tried in this DC failed unexpectedly, not failing over");
       }
@@ -415,7 +416,7 @@ public class CrossDatacenterFailover {
 
       // The request failed with a rather unusual error. This generally indicates a more serious
       // issue, since the retry policy decided to surface the error immediately. Trying another DC
-      // is not a good idea.
+      // is probably a bad idea.
       System.out.println("The request failed unexpectedly, not failing over: " + mainException);
       return false;
     }
